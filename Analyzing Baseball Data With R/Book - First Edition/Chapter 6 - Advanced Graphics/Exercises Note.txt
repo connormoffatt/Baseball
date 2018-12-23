@@ -1,0 +1,1 @@
+Note: Since this chapter deals with graphical packages in R, the exercises will not be completed
