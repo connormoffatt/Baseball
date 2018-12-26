@@ -1,0 +1,1 @@
+Note: Since, the remaining chapter and exercises are simply fitting models in R. The chapter an exercises will be performed at a later data.
