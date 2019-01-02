@@ -1,9 +1,18 @@
 import pandas as pd
+import numpy as np
+
 from general import add_runs_value
 from general import create_runs_matrix
+from general import add_home_won
+from general import add_game_state
+from general import win_prob_matrix
+from general import add_win_prob_value
+from general import create_standings
 
 import warnings
 warnings.filterwarnings('ignore')
+
+#%%
 
 def retrosheet_event_dict():
     ''' create and return retrosheet event dictionary'''
@@ -914,9 +923,6 @@ def advanced_batting(pbp, df, runs_pbp):
     runs_matrix = create_runs_matrix(runs_pbp)
     pbp = add_runs_value(pbp, runs_matrix)
     
-    # Initialize event sheet
-    e =  retrosheet_event_dict()
-    
     # Calculate the frequencies for ultimate base running
     ubr_freq = ubr_run_frequency(runs_pbp)
     
@@ -947,9 +953,6 @@ def advanced_batting(pbp, df, runs_pbp):
         
         # Get player id for the current row
         pid = row['ID']
-        
-        # Get dataframe while player id the batter during a batting event
-        df_bat = pbp[(pbp.RESP_BAT_ID == pid) & (pbp.BAT_EVENT_FL == 'T')]
 
         # BB%
         df.at[ix, 'BB%'] = round(100 * df.at[ix, 'BB'] / df.at[ix, 'PA'], 2)
@@ -1032,34 +1035,244 @@ def advanced_batting(pbp, df, runs_pbp):
         # wRC
         df.at[ix, 'wRC'] = df.at[ix, 'wRAA'] + df.at[ix, 'PA'] * R_per_PA
         
-        # wRC+ (Note we will not weight by NL/AL but simply all the data)
-     
+        # BsR (Base Running Runs)
+        df.at[ix, 'BsR'] = df.at[ix, 'UBR'] + df.at[ix, 'wGDP'] + \
+                            df.at[ix, 'wSB']
+        
+    # wRC+ (Note we will not weight by NL/AL but simply all the data)
     wRC_avg = df['wRC'].mean()
     
     # Loop back through to calculate wRC+ since it is based on average of wRC
     for ix, _ in df.iterrows():
         pf_team = pf[df.at[ix, 'Team']]
         
+        # wRC+
         # Account for park factors
-        df.at[ix, 'wRC+'] = (df.at[ix, 'wRC'] + (1 - pf_team) * R_per_PA )
-        
+        df.at[ix, 'wRC+'] = df.at[ix, 'wRC'] + (1 - pf_team) * R_per_PA 
         # scale
         df.at[ix, 'wRC+'] = df.at[ix, 'wRC+'] / wRC_avg * 100
         
+        # Batting Runs (Don't take into account AL/NL)
+        df.at[ix, 'Batting Runs'] = df.at[ix, 'wRAA'] + (1-pf_team) * R_per_PA
+        
+        # ORAA - Offensive Runs Above Average
+        df.at[ix, 'ORAA'] = df.at[ix, 'Batting Runs'] + df.at[ix, 'BsR']
     return df
 
-
-#%% testing
-roster = pd.read_csv('roster2018.csv')
-names = [['Albert', 'Pujols'], ['Mike', 'Trout'], ['David', 'Fletcher']]
-#names = [['Mike', 'Trout']]
-from initialize_players import initialize_list_to_df
-df1 = initialize_list_to_df(roster, names)
-pbp = pd.read_csv('all2018.csv', header=None)
-fields = pd.read_csv('fields.csv')
-pbp.columns = fields.loc[:, 'Header']
+def batted_ball(pbp, df, runs_pbp):
+    ''' Add some batted ball batting statistics to a dataframe
+    
+    Note: We don't have quality enough location data in retrosheet to have
+    pull, cent, oppo. Also don't know if hits stay in the infield. Finally,
+    don't know contact type
+        
+    Actual Batted Ball Stats: GB/FB, LD%, GB%, FB%, IFFB%, HR/FB, IFH (infield
+    hits), IFH%, BUH (bunt hits), BUH%, Pull%, Cent%, Oppo%, Soft%, Med%, Hard%
+        
+    Batted Ball Stats Calculated: GB/FB, LD%, GB%, FB%, HR/ FB, BUH, BUH%, GB,
+    FB, LD, IFFB, BU (bunts), 
+    
+    Arguments:
+        pbp: play by play data for a given period to calculate statistics for
+        df: dataframe with players to calculate standard statistics for
+        runs_pbp: play by play data to calculate run matrix
+        
+    Output:
+        dataframe with advanced stats appended
+    '''
+    
+    e = retrosheet_event_dict()
+    
+    # Loop through every player 
+    for ix, row in df.iterrows():
+        
+        # Get batting events for a specific player
+        bat = pbp[(pbp.RESP_BAT_ID == row['ID']) & (pbp.BAT_EVENT_FL == 'T')]
+        
+        # Get frequency of events. ground ball, line drive, flyball, pop-ups
+        gb = (bat.BATTEDBALL_CD == 'G').sum()
+        ld = (bat.BATTEDBALL_CD == 'L').sum()
+        fb = (bat.BATTEDBALL_CD == 'F').sum()
+        iffb = (bat.BATTEDBALL_CD == 'P').sum()
+        
+        # fly balls include infield fly balls
+        fb += iffb
+        
+        # Get the number of balls in play, home runs, pop-ups, bunts, bunt hits
+        bip = gb + ld + fb
+        
+        bunt_hits = ((bat.EVENT_CD == e['Single']) & \
+                            (bat.BUNT_FL == 'T')).sum()
+        bunts = (bat.BUNT_FL == 'T').sum()
+        hr = (bat.EVENT_CD == e['Home run']).sum()
+        
+        # Calculate ratios
+        df.at[ix, 'GB/FB'] = round(gb / fb, 3)
+        df.at[ix, 'LD%'] = round(100 * ld / bip, 2)
+        df.at[ix, 'GB%'] = round(100 * gb / bip, 2)
+        df.at[ix, 'FB%'] = round(100 * fb / bip, 2)
+        df.at[ix, 'IFFB%'] = round(100 * iffb / bip, 2)
+        df.at[ix, 'HR/FB'] = round(hr / fb, 3)
+        df.at[ix, 'BUH'] = bunt_hits
+        df.at[ix, 'BUH%'] = round(100 * bunt_hits / (bunt_hits + bunts), 2)
+        df.at[ix, 'GB'] = gb
+        df.at[ix, 'FB'] = fb
+        df.at[ix, 'LD'] = ld
+        df.at[ix, 'IFFB'] = iffb
+        df.at[ix, 'BU'] = bunts
+        
+    return df
 
 #%%
 
+def runs_per_win(pbp):
+    ''' Get the runs per win for play by play data
+    
+    Argument: retrosheet play by play data
+    
+    Output: runs per win value
+    '''
+    
+    # Create standings for play by play data
+    stand = create_standings(pbp)
+    
+    # Get average runs per game which would be total runs / 2 / G
+    stand['G'] = stand.W + stand.L
+    runs_per_game = (stand.R.sum() + stand.RA.sum()) / (2 * stand.G.sum())
+    
+    # Calculate pythagorean coefficient for R^x / (R^x + RA^x)
+    stand['log_win_ratio'] = np.log(stand.W.astype(float) / \
+                                 stand.L.astype(float))
+    stand['log_run_ratio'] = np.log(stand.R / stand.RA)
+    
+    # Calculate lnear regression through origin in order to calculate proper
+    # exponent
+    wins = np.array(stand.log_win_ratio)
+    runs = np.array(stand.log_run_ratio)[:, np.newaxis]
+    
+    pythagorean_coefficient = np.linalg.lstsq(runs, wins)[0][0]
+
+    # return Caola derived runs per win
+    return 4 * runs_per_game / pythagorean_coefficient
+
+#%%
+def win_probability(pbp, df, runs_pbp, wp_pbp, run_type='differential',
+                    wp_standings=None, pbp_standings=None):
+    ''' Add win probability data to dataframe. There are different options
+    in run_type and standings to choose which model to calculate win
+    probability from
+    
+    Standings data frame contains a team and their winning percentage 
+    for a given season. Standings has index 'XXXYYY' where XXX is the team ID 
+    and YYYY is the four digit year as index and an attribute for winning 
+    percentage named 'WPct'
+    
+    NOTE: pbp should be a subset of wp_pbp.
+    
+    Also remmeber that WPA is not predictive
+    
+    Arguments:
+        pbp: play by play data for a given period to calculate statistics for
+        df: dataframe with players to calculate standard statistics for
+        runs_pbp: play by play data to calculate run matrix
+        wp_pbp: play by play data to calculate win probability
+        run_type: string that is either 'differential' or 'score. If it is
+        'differential' our game state contains (Home Score - Away Score). If it
+        is 'score' our game state contains Home Score + '_' + Away Score.
+        standings: data frame containing WPct of teams being evaluated. If this
+        is not None then team records will be taken into account.
+            
+            wp_standings are standings for teams in wp_pbp data
+            pbp_standings are standings for teams in pbp data
+        
+    Output:
+        dataframe with advanced stats appended
+    '''
+    # Add wins_value to pbp using wp_pbp data. Use 
+    wp_pbp = add_home_won(wp_pbp)
+    wp_pbp = add_game_state(wp_pbp, run_type, wp_standings)
+    win_matrix = win_prob_matrix(wp_pbp)
+    
+    pbp = add_home_won(pbp)
+    pbp = add_game_state(pbp, run_type, pbp_standings)
+    pbp = add_win_prob_value(pbp, win_matrix)
+    
+    # Add run_value expectancy
+    run_matrix = create_runs_matrix(runs_pbp)
+    pbp = add_runs_value(pbp, run_matrix)
+    
+    RPW = runs_per_win(pbp)
+    # Loop through every player 
+    for ix, row in df.iterrows():
+        
+        # Get batting events for a specific player
+        bat = pbp[(pbp.RESP_BAT_ID == row['ID']) & (pbp.BAT_EVENT_FL == 'T')]
+        
+        # WPA (Win Probability Added)
+        df.at[ix, 'WPA'] = bat.win_value.sum()
+        
+        # -WPA (Negative Win Probaiblity Added)
+        df.at[ix, '-WPA'] = bat[bat.win_value < 0].win_value.sum()
+        
+        # + WPA (Positive Win Probability Added)
+        df.at[ix, '+WPA'] = bat[bat.win_value > 0].win_value.sum()
+        
+        # RE24 (Run Expectancy 24 Base Out State)
+        df.at[ix, 'RE24'] = bat.runs_value.sum()
+        
+        # REW (Run Expectancy Wins)
+        df.at[ix, 'REW'] = df.at[ix, 'RE24'] / RPW
+        
+    return df
+#%%
+# =============================================================================
+# #%% testing
+# roster = pd.read_csv('roster2018.csv')
+# names = [['Albert', 'Pujols'], ['Mike', 'Trout'], ['David', 'Fletcher']]
+# #names = [['Mike', 'Trout']]
+# from initialize_players import initialize_list_to_df
+# df1 = initialize_list_to_df(roster, names)
+# pbp = pd.read_csv('all2018.csv', header=None)
+# fields = pd.read_csv('fields.csv')
+# pbp.columns = fields.loc[:, 'Header']
+# 
+# #%%
+# 
+# df = standard_batting(pbp, df1)
+# #df = advanced_batting(pbp, df, pbp)
+# df = batted_ball(pbp, df, pbp)
+# 
+# =============================================================================
+#%% WPA testing
+roster = pd.read_csv('roster2018.csv')
+#names = [['Albert', 'Pujols'], ['Mike', 'Trout'], ['David', 'Fletcher']]
+names = [['Mike', 'Trout']]
+from initialize_players import initialize_list_to_df
+df1 = initialize_list_to_df(roster, names)
+
+pbp = pd.read_csv('all2018.csv', header=None)
+pbp2017 = pd.read_csv('all2017.csv', header=None)
+pbp2016 = pd.read_csv('all2016.csv', header=None)
+pbp2015 = pd.read_csv('all2015.csv', header=None)
+pbp2014 = pd.read_csv('all2014.csv', header=None)
+
+wp_pbp = pbp.append(pbp2017)
+wp_pbp = wp_pbp.append(pbp2016)
+wp_pbp = wp_pbp.append(pbp2015)
+wp_pbp = wp_pbp.append(pbp2014)
+
+
+fields = pd.read_csv('fields.csv')
+pbp.columns = fields.loc[:, 'Header']
+wp_pbp.columns = fields.loc[:, 'Header']
+
 df = standard_batting(pbp, df1)
-df = advanced_batting(pbp, df, pbp)
+
+stand_wp_pbp = create_standings(wp_pbp)
+stand_pbp = create_standings(pbp)
+
+#%%
+df2 = win_probability(pbp, df, pbp, wp_pbp, run_type='differential',
+                     wp_standings=stand_wp_pbp, pbp_standings=stand_pbp)
+
+
