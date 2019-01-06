@@ -650,8 +650,7 @@ def ubr_score(pbp, pid, freq, run):
             df2f.at[ix, 'adv'] = df2f.at[ix, 'adv'][:4] + num_outs
             df2f.at[ix, 'stay'] = df2f.at[ix, 'stay'][:4] + num_outs
             df2f.at[ix, 'out'] = df2f.at[ix, 'out'][:4] + num_outs
-        print('---------------------------------')
-        print(df2f.out)
+
         # Change four outs to three outs
         df2f['adv'] = np.where(df2f.adv.str[-1].astype(int) > 3, 
                         df2f.adv.str[:-1] + '3', df2f.adv)
@@ -669,7 +668,6 @@ def ubr_score(pbp, pid, freq, run):
                     - orig_val + df2f.runs_scored
         df2f_stay = run.loc[df2f.stay,].reset_index().loc[:, 'RUNS_ROI'] \
                     - orig_val + df2f.runs_scored
-        print(df2f.out)
         df2f_out = run.loc[df2f.out,].reset_index().loc[:, 'RUNS_ROI'] - \
                     orig_val + df2f.runs_scored
                     
