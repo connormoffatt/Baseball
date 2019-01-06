@@ -8,41 +8,13 @@ from general import add_game_state
 from general import win_prob_matrix
 from general import add_win_prob_value
 from general import create_standings
-
+from general import retrosheet_event_dict
+from general import retrosheet_add_location
+from general import retrosheet_add_zone
 import warnings
 warnings.filterwarnings('ignore')
 
 #%%
-
-def retrosheet_event_dict():
-    ''' create and return retrosheet event dictionary'''
-    d = {}
-    d['Unknown Event'] = 0
-    d['No event'] = 1
-    d['Generic out'] = 2
-    d['Strikeout'] = 3
-    d['Stolen base'] = 4
-    d['Defensive indifference'] = 5
-    d['Caught stealing'] = 6
-    d['Pickoff error'] = 7
-    d['Pickoff'] = 8
-    d['Wild pitch'] = 9
-    d['Passed ball'] = 10
-    d['Balk'] = 11
-    d['Other Advance'] = 12
-    d['Foul error'] = 13
-    d['Walk'] = 14
-    d['Intentional walk'] = 15
-    d['Hit by pitch'] = 16
-    d['Interference'] = 17
-    d['Error'] = 18
-    d['Fielder choice'] = 19
-    d['Single'] = 20
-    d['Double'] = 21
-    d['Triple'] = 22
-    d['Home run'] = 23
-    d['Missing play'] = 24
-    return d
 
 def standard_batting(pbp, df):
     ''' Add all standard batting statistics to a dataframe
@@ -269,8 +241,7 @@ def wGDP_score(pbp, pid, dp_avg_runs):
             dp_111_0_val + dp_111_1_val + dp_101_0_val + dp_101_1_val
             
     return wGDP
-        
-    
+
 def ubr_run_frequency(pbp):
     ''' Calculate frequency of baserunning events from play by play data
     
@@ -281,135 +252,154 @@ def ubr_run_frequency(pbp):
         Dictionary that determines frequency for which baserunning events
         such as a batter advancing occurs
     '''
+    # Add location
+    pbp = retrosheet_add_location(pbp)
+    pbp = retrosheet_add_zone(pbp)
+    
     # Initialize retrosheet events
     e = retrosheet_event_dict()
     
-    # Initilaize output dictionary that will contain frequencies of events
-    d = {}
+    # Initilaize output dictionary that will contain dictionaries that 
+    # contain frequencies of events
+    dall = {}
+    
+    # Iterate through all the zones
+    for i in range(1, 10):
+        d = {}
+        p = pbp[pbp.zone == str(i)]
         
-    # Calculation does not account for when runners do not move up one base
-    # on singles and two bases on double. Also assumes that runners will not
-    # score from first on singles
+        # Calculation does not account for when runners do not move up one base
+        # on singles and two bases on double. Also assumes that runners won't
+        # score from first on singles
+        
+        # Type (1) Players advance extra base on bases
+        
+        # Create dataframe for when there is a runner on first and a runner
+        # does not end up on third. For singles and doubles
+        df1s = p[(~p.BASE1_RUN_ID.isna()) & (p.EVENT_CD == e['Single']) & 
+                   (p.RUN3_DEST_ID != 3) & (p.RUN2_DEST_ID != 3)]
+        df1d = p[(~p.BASE1_RUN_ID.isna()) & (p.EVENT_CD == e['Double'])]
+        
+        # Create dataframe for when there is a runner on second and a single
+        df2s = p[(~p.BASE2_RUN_ID.isna()) & (p.EVENT_CD == e['Single'])]
+        
+        # 1s means single with runner on first 1d is double with runner on 1st
+        # 2s means single with runner on second
+        
+        # Get the frequency for staying, or out for the runner on first when
+        # they are not blocked
+        d['1s_advance'] = len(df1s[df1s.RUN1_DEST_ID == 3])
+        d['1s_stay'] = len(df1s[df1s.RUN1_DEST_ID == 2])
+        d['1s_out'] = len(df1s[(df1s.RUN1_DEST_ID == 0) & 
+                         (~df1s.RUN1_PLAY_TX.isna())])
+        
+        # normalize runner on first single
+        first_single = d['1s_advance'] + d['1s_stay'] + d['1s_out']
+        if first_single > 0:
+            d['1s_advance'] = d['1s_advance'] / first_single
+            d['1s_stay'] = d['1s_stay'] / first_single
+            d['1s_out'] = d['1s_out'] / first_single
+        
+        # Get the frequency for staying, advance, or out for the runner on 1st
+        # during a double
+        d['1d_advance'] = len(df1d[df1d.RUN1_DEST_ID >= 4])
+        d['1d_stay'] = len(df1d[df1d.RUN1_DEST_ID == 3])
+        d['1d_out'] = len(df1d[(df1d.RUN1_DEST_ID == 0) & 
+                             (~df1d.RUN1_PLAY_TX.isna())])
+        
+        # normalize runner on first double
+        first_double = d['1d_advance'] + d['1d_stay'] + d['1d_out']
+        if first_double > 0:
+            d['1d_advance'] = d['1d_advance'] / first_double
+            d['1d_stay'] = d['1d_stay'] / first_double
+            d['1d_out'] = d['1d_out'] / first_double
+        
+        # Get the frequency for staying, advancing, or out for runner on 2nd
+        # during a single
+        d['2s_advance'] = len(df2s[df2s.RUN2_DEST_ID == 4])
+        d['2s_stay'] = len(df2s[df2s.RUN2_DEST_ID == 3])
+        d['2s_out'] = len(df2s[(df2s.RUN2_DEST_ID == 0) & 
+                         (~df2s.RUN2_PLAY_TX.isna())]) 
     
-    # Type (1) Players advance extra base on bases
+        # normalize runner on second single
+        second_single = d['2s_advance'] + d['2s_stay'] + d['2s_out']
+        if second_single > 0:
+            d['2s_advance'] = d['2s_advance'] / second_single
+            d['2s_stay'] = d['2s_stay'] / second_single
+            d['2s_out'] = d['2s_out'] / second_single
+        
+        # Type (2) Batters Advancing an extra base
+        # Assume that batters do not extend triples for inside the park homerun
+        
+        # Get singles where runner is not blocked
+        df0s = p[(p.EVENT_CD == e['Single']) & (p.RUN1_DEST_ID != 2)]
+        
+        # Get doubles where runner is not blocked
+        df0d = p[(p.EVENT_CD == e['Double']) & (p.RUN1_DEST_ID != 2) & 
+                   (p.RUN2_DEST_ID != 2) & (p.RUN3_DEST_ID != 2)]
+        
+        
+        # Single where the hitter gets out and is not blocked
+        d['0s_out'] = len(df0s[df0s.BAT_DEST_ID == 0])
+        # Single where a hitter is safe and is not blocked
+        d['0s_stay'] = len(df0s[df0s.BAT_DEST_ID == 1])
+        
+        # Normalize values
+        batter_single = d['0s_out'] + d['0s_stay']
+        if batter_single > 0:
+            d['0s_out'] = d['0s_out'] / batter_single
+            d['0s_stay'] = d['0s_stay'] / batter_single
+        
+        # Double where the hitter is out and is not blocked
+        d['0d_out'] = len(df0d[df0d.BAT_DEST_ID == 0])
+        # Double where the hitter is safe and is not blocked
+        d['0d_stay'] = len(df0d[df0d.BAT_DEST_ID == 2])
+        
+        # Normalize values
+        batter_double = d['0d_out'] + d['0d_stay']
+        if batter_double > 0:
+            d['0d_out'] = d['0d_out'] / batter_double
+            d['0d_stay'] = d['0d_stay'] / batter_double
+        
+        # Type (3) Frequency of tagging
+        # Assume that runners do not tag from first base
+        
+        # Get fly balls with runner on second that isn't blocked
+        df2f = p[(~p.BASE2_RUN_ID.isna()) & (p.BASE3_RUN_ID.isna()) & 
+                   (p.BATTEDBALL_CD == 'F') & (p.EVENT_CD == e['Generic out'])]
+        
+        # Get fly balls with runner on third
+        df3f = p[(~p.BASE3_RUN_ID.isna()) & (p.BATTEDBALL_CD == 'F') & 
+                   (p.EVENT_CD == e['Generic out'])]
+        
+        d['2f_advance'] = len(df2f[df2f.RUN2_DEST_ID == 3])
+        d['2f_stay'] = len(df2f[df2f.RUN2_DEST_ID == 2])
+        d['2f_out'] = len(df2f[(df2f.RUN2_DEST_ID == 0) & 
+                             (~df2f.RUN2_PLAY_TX.isna())])
+        
+        # Normalize tagging from second to get frequencies
+        second_tag = d['2f_advance'] + d['2f_stay'] + d['2f_out']
+        if second_tag > 0:
+            d['2f_advance'] = d['2f_advance'] / second_tag
+            d['2f_stay'] = d['2f_stay'] / second_tag
+            d['2f_out'] = d['2f_out'] / second_tag
+        
+        d['3f_advance'] = len(df3f[df3f.RUN3_DEST_ID >= 4])
+        d['3f_stay'] = len(df3f[df3f.RUN3_DEST_ID == 3])
+        d['3f_out'] = len(df3f[(df3f.RUN3_DEST_ID == 0) & 
+                                 (~df3f.RUN3_PLAY_TX.isna())])
+        
+        # Normalize tagging from third to get frequencies
+        third_tag = d['3f_advance'] + d['3f_stay'] + d['3f_out']
+        if third_tag > 0:
+            d['3f_advance'] = d['3f_advance'] / third_tag
+            d['3f_stay'] = d['3f_stay'] / third_tag
+            d['3f_out'] = d['3f_out'] / third_tag
+        
+        dall[str(i)] = d
     
-    # Create dataframe for when there is a runner on first and a runner
-    # does not end up on third. For singles and doubles
-    df1s = pbp[(~pbp.BASE1_RUN_ID.isna()) & (pbp.EVENT_CD == e['Single']) & \
-               (pbp.RUN3_DEST_ID != 3) & (pbp.RUN2_DEST_ID != 3)]
-    df1d = pbp[(~pbp.BASE1_RUN_ID.isna()) & (pbp.EVENT_CD == e['Double'])]
+    return dall
     
-    # Create dataframe for when there is a runner on second and a single
-    df2s = pbp[(~pbp.BASE2_RUN_ID.isna()) & (pbp.EVENT_CD == e['Single'])]
-    
-    # 1s means single with runner on first 1d is double with runner on first
-    # 2s means single with runner on second
-    
-    # Get the frequency for staying, or out for the runner on first when
-    # they are not blocked
-    d['1s_advance'] = len(df1s[df1s.RUN1_DEST_ID == 3])
-    d['1s_stay'] = len(df1s[df1s.RUN1_DEST_ID == 2])
-    d['1s_out'] = len(df1s[(df1s.RUN1_DEST_ID == 0) & \
-                     (~df1s.RUN1_PLAY_TX.isna())])
-    
-    # normalize runner on first single
-    first_single = d['1s_advance'] + d['1s_stay'] + d['1s_out']
-    d['1s_advance'] = d['1s_advance'] / first_single
-    d['1s_stay'] = d['1s_stay'] / first_single
-    d['1s_out'] = d['1s_out'] / first_single
-    
-    # Get the frequency for staying, advance, or out for the runner on first
-    # during a double
-    d['1d_advance'] = len(df1d[df1d.RUN1_DEST_ID >= 4])
-    d['1d_stay'] = len(df1d[df1d.RUN1_DEST_ID == 3])
-    d['1d_out'] = len(df1d[(df1d.RUN1_DEST_ID == 0) & \
-                         (~df1d.RUN1_PLAY_TX.isna())])
-    
-    # normalize runner on first double
-    first_double = d['1d_advance'] + d['1d_stay'] + d['1d_out']
-    d['1d_advance'] = d['1d_advance'] / first_double
-    d['1d_stay'] = d['1d_stay'] / first_double
-    d['1d_out'] = d['1d_out'] / first_double
-    
-    # Get the frequency for staying, advancing, or out for runner on second
-    # during a single
-    d['2s_advance'] = len(df2s[df2s.RUN2_DEST_ID == 4])
-    d['2s_stay'] = len(df2s[df2s.RUN2_DEST_ID == 3])
-    d['2s_out'] = len(df2s[(df2s.RUN2_DEST_ID == 0) & \
-                     (~df2s.RUN2_PLAY_TX.isna())]) 
-
-    # normalize runner on second single
-    second_single = d['2s_advance'] + d['2s_stay'] + d['2s_out']
-    d['2s_advance'] = d['2s_advance'] / second_single
-    d['2s_stay'] = d['2s_stay'] / second_single
-    d['2s_out'] = d['2s_out'] / second_single
-    
-    # Type (2) Batters Advancing an extra base
-    # Assume that batters do not extend triples for inside the park home run
-    
-    # Get singles where runner is not blocked
-    df0s = pbp[(pbp.EVENT_CD == e['Single']) & (pbp.RUN1_DEST_ID != 2)]
-    
-    # Get doubles where runner is not blocked
-    df0d = pbp[(pbp.EVENT_CD == e['Double']) & (pbp.RUN1_DEST_ID != 2) & \
-               (pbp.RUN2_DEST_ID != 2) & (pbp.RUN3_DEST_ID != 2)]
-    
-    
-    # Single where the hitter gets out and is not blocked
-    d['0s_out'] = len(df0s[df0s.BAT_DEST_ID == 0])
-    # Single where a hitter is safe and is not blocked
-    d['0s_stay'] = len(df0s[df0s.BAT_DEST_ID == 1])
-    
-    # Normalize values
-    batter_single = d['0s_out'] + d['0s_stay']
-    d['0s_out'] = d['0s_out'] / batter_single
-    d['0s_stay'] = d['0s_stay'] / batter_single
-    
-    # Double where the hitter is out and is not blocked
-    d['0d_out'] = len(df0d[df0d.BAT_DEST_ID == 0])
-    # Double where the hitter is safe and is not blocked
-    d['0d_stay'] = len(df0d[df0d.BAT_DEST_ID == 2])
-    
-    # Normalize values
-    batter_double = d['0d_out'] + d['0d_stay']
-    d['0d_out'] = d['0d_out'] / batter_double
-    d['0d_stay'] = d['0d_stay'] / batter_double
-    
-    # Type (3) Frequency of tagging
-    # Assume that runners do not tag from first base
-    
-    # Get fly balls with runner on second that isn't blocked
-    df2f = pbp[(~pbp.BASE2_RUN_ID.isna()) & (pbp.BASE3_RUN_ID.isna()) & \
-               (pbp.BATTEDBALL_CD == 'F') & (pbp.EVENT_CD == e['Generic out'])]
-    
-    # Get fly balls with runner on third
-    df3f = pbp[(~pbp.BASE3_RUN_ID.isna()) & (pbp.BATTEDBALL_CD == 'F') & \
-               (pbp.EVENT_CD == e['Generic out'])]
-    
-    d['2f_advance'] = len(df2f[df2f.RUN2_DEST_ID == 3])
-    d['2f_stay'] = len(df2f[df2f.RUN2_DEST_ID == 2])
-    d['2f_out'] = len(df2f[(df2f.RUN2_DEST_ID == 0) & \
-                         (~df2f.RUN2_PLAY_TX.isna())])
-    
-    # Normalize tagging from second to get frequencies
-    second_tag = d['2f_advance'] + d['2f_stay'] + d['2f_out']
-    d['2f_advance'] = d['2f_advance'] / second_tag
-    d['2f_stay'] = d['2f_stay'] / second_tag
-    d['2f_out'] = d['2f_out'] / second_tag
-    
-    d['3f_advance'] = len(df3f[df3f.RUN3_DEST_ID >= 4])
-    d['3f_stay'] = len(df3f[df3f.RUN3_DEST_ID == 3])
-    d['3f_out'] = len(df3f[(df3f.RUN3_DEST_ID == 0) & \
-                             (~df3f.RUN3_PLAY_TX.isna())])
-    
-    # Normalize tagging from third to get frequencies
-    third_tag = d['3f_advance'] + d['3f_stay'] + d['3f_out']
-    d['3f_advance'] = d['3f_advance'] / third_tag
-    d['3f_stay'] = d['3f_stay'] / third_tag
-    d['3f_out'] = d['3f_out'] / third_tag
-    
-    return d
-
 def ubr_score(pbp, pid, freq, run):
     ''' 
     Calculate a player's UBR given play-by-play data and an UBR frequency
@@ -425,250 +415,318 @@ def ubr_score(pbp, pid, freq, run):
         ubr: value of a player's UBR given play by play data
     '''
     e = retrosheet_event_dict()
+    ubr = 0
     
-    # Type 1 UBR
+    # Iterate through all zones
+    for i in range(1, 10):
+        j = str(i)
+        p = pbp[pbp.zone == j]
+        
+        # Type 1 UBR
+        
+        # Runner on first single not blocked
+        df1s = p[(p.BASE1_RUN_ID == pid) & (p.EVENT_CD == e['Single']) & 
+                   (p.RUN3_DEST_ID != 3) & (p.RUN2_DEST_ID != 3)]
+        
+        # Calculate the advance, stay, out states unless inning ends
+        # Add out if actual state was not out
+        df1s['adv'] = df1s.new_state.apply(lambda x: '101' + x[3:])
+        df1s['stay'] = df1s.new_state.apply(lambda x: '110' + x[3:])
+        df1s['out'] = df1s.new_state.apply(lambda x: '100 '+str(int(x[4]) + 1))
+        
+        # Subtract an out from hypotheticals if actual out occurred
+        for ix in df1s[df1s.EVENT_OUTS_CT > 0].index:
+            num_outs = str(int(df1s.at[ix, 'out'][4]) - 1)
+            df1s.at[ix, 'adv'] = df1s.at[ix, 'adv'][:4] + num_outs
+            df1s.at[ix, 'stay'] = df1s.at[ix, 'stay'][:4] + num_outs
+            df1s.at[ix, 'out'] = df1s.at[ix, 'out'][:4] + num_outs
+            
+        # Change four outs to three outs
+        df1s['adv'] = np.where(df1s.adv.str[-1].astype(int) > 3, 
+                        df1s.adv.str[:-1] + '3', df1s.adv)
+        df1s['stay'] = np.where(df1s.stay.str[-1].astype(int) > 3, 
+                                df1s.stay.str[:-1] + '3', df1s.stay)
+        df1s['out'] = np.where(df1s.out.str[-1].astype(int) > 3, 
+                                df1s.out.str[:-1] + '3', df1s.out)
+        
+        # Reset index and get the original run values
+        df1s = df1s.reset_index(drop=True)         
+        orig_val = run.loc[df1s.state,].reset_index().loc[:, 'RUNS_ROI']
+        
+        # Calculate the value generated by each hypothetical state
+        df1s_adv = run.loc[df1s.adv,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df1s.runs_scored
+        df1s_stay = run.loc[df1s.stay,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df1s.runs_scored
+        df1s_out = run.loc[df1s.out,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df1s.runs_scored
+                    
+        # Calculate the expected run values given frequency
+        df1s_exp_runs = freq[j]['1s_advance'] * df1s_adv + \
+                        freq[j]['1s_stay'] * df1s_stay + \
+                        freq[j]['1s_out'] * df1s_out
+        
+        # Calculate the UBR by the difference in runs expectation
+        ubr += (df1s.runs_value - df1s_exp_runs).sum()
+        
+        # Runner on first double not blocked
+        df1d = p[(p.BASE1_RUN_ID == pid) & (p.EVENT_CD == e['Double'])]
+        
+        # Calculate the advance, stay, out states unless inning ends
+        df1d['adv'] = df1d.new_state.apply(lambda x: '010' + x[3:])
+        df1d['stay'] = df1d.new_state.apply(lambda x: '011' + x[3:])
+        df1d['out'] = df1d.new_state.apply(lambda x: '010 '+str(int(x[4]) + 1))
+        
+        # Subtract an out from hypotheticals if actual out occurred
+        for ix in df1d[df1d.EVENT_OUTS_CT > 0].index:
+            num_outs = str(int(df1d.at[ix, 'out'][4]) - 1)
+            df1d.at[ix, 'adv'] = df1d.at[ix, 'adv'][:4] + num_outs
+            df1d.at[ix, 'stay'] = df1d.at[ix, 'stay'][:4] + num_outs
+            df1d.at[ix, 'out'] = df1d.at[ix, 'out'][:4] + num_outs
+            
+        # Change four outs to three outs
+        df1d['adv'] = np.where(df1d.adv.str[-1].astype(int) > 3, 
+                        df1d.adv.str[:-1] + '3', df1d.adv)
+        df1d['stay'] = np.where(df1d.stay.str[-1].astype(int) > 3, 
+                                df1d.stay.str[:-1] + '3', df1d.stay)
+        df1d['out'] = np.where(df1d.out.str[-1].astype(int) > 3, 
+                                df1d.out.str[:-1] + '3', df1d.out)
+        
+        # Reset index and get the original run values
+        df1d = df1d.reset_index(drop=True)         
+        orig_val = run.loc[df1d.state,].reset_index().loc[:, 'RUNS_ROI']
+        
+        # Calculate the value generated by each hypothetical state
+        df1d_adv = run.loc[df1d.adv,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df1d.runs_scored
+        df1d_stay = run.loc[df1d.stay,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df1d.runs_scored
+        df1d_out = run.loc[df1d.out,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df1d.runs_scored
+                    
+        # Calculate the expected run values given frequency
+        df1d_exp_runs = freq[j]['1d_advance'] * df1d_adv + \
+                        freq[j]['1d_stay'] * df1d_stay + \
+                        freq[j]['1d_out'] * df1d_out
+        
+        # Calculate the UBR by the difference in runs expectation
+        ubr += (df1d.runs_value - df1d_exp_runs).sum()
+        
+        # Runner on second single
+        df2s = p[(p.BASE2_RUN_ID == pid) & (p.EVENT_CD == e['Single'])]
+        
+         # Calculate the advance, stay, out states unless inning ends
+        df2s['adv'] = df2s.new_state.apply(lambda x: x[:2] + '0' + x[3:])
+        df2s['stay'] = df2s.new_state.apply(lambda x: x[:2] + '1' + x[3:])
+        df2s['out'] = df2s.new_state.apply(lambda x: x[:2] + '0 ' + 
+                        str(int(x[4]) + 1))
+        
+        # Subtract an out from hypotheticals if actual out occurred
+        for ix in df2s[df2s.EVENT_OUTS_CT > 0].index:
+            num_outs = str(int(df2s.at[ix, 'out'][4]) - 1)
+            df2s.at[ix, 'adv'] = df2s.at[ix, 'adv'][:4] + num_outs
+            df2s.at[ix, 'stay'] = df2s.at[ix, 'stay'][:4] + num_outs
+            df2s.at[ix, 'out'] = df2s.at[ix, 'out'][:4] + num_outs
+            
+        # Change four outs to three outs
+        df2s['adv'] = np.where(df2s.adv.str[-1].astype(int) > 3, 
+                        df2s.adv.str[:-1] + '3', df2s.adv)
+        df2s['stay'] = np.where(df2s.stay.str[-1].astype(int) > 3, 
+                                df2s.stay.str[:-1] + '3', df2s.stay)
+        df2s['out'] = np.where(df2s.out.str[-1].astype(int) > 3, 
+                                df2s.out.str[:-1] + '3', df2s.out)
+        
+        # Reset index and get the original run values
+        df2s = df2s.reset_index(drop=True)         
+        orig_val = run.loc[df2s.state,].reset_index().loc[:, 'RUNS_ROI']
+        
+        # Calculate the value generated by each hypothetical state
+        df2s_adv = run.loc[df2s.adv,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df2s.runs_scored
+        df2s_stay = run.loc[df2s.stay,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df2s.runs_scored
+        df2s_out = run.loc[df2s.out,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df2s.runs_scored
+                    
+        # Calculate the expected run values given frequency
+        df2s_exp_runs = freq[j]['2s_advance'] * df2s_adv + \
+                        freq[j]['2s_stay'] * df2s_stay + \
+                        freq[j]['2s_out'] * df2s_out
+        
+        # Calculate the UBR by the difference in runs expectation
+        ubr += (df2s.runs_value - df2s_exp_runs).sum()
+        
+        # Type 2 UBR
     
-    # Runner on first single not blocked
-    df1s = pbp[(pbp.BASE1_RUN_ID == pid) & (pbp.EVENT_CD == e['Single']) & \
-               (pbp.RUN3_DEST_ID != 3) & (pbp.RUN2_DEST_ID != 3)]
+        # Batter hits single
+        df0s = p[(p.EVENT_CD == e['Single']) & (p.RUN1_DEST_ID != 2) & 
+                   (p.RESP_BAT_ID == pid)]
     
-    # Calculate the advance, stay, out states unless inning ends
-    # Add out if actual state was not out
-    df1s['adv'] = df1s.new_state.apply(lambda x: '101' + x[3:])
-    df1s['stay'] = df1s.new_state.apply(lambda x: '110' + x[3:])
-    df1s['out'] = df1s.new_state.apply(lambda x: '100 ' + str(int(x[4]) + 1))
+        df0s['out'] = df0s.new_state.apply(lambda x: '00' + x[2:4] + 
+                        str(int(x[4]) + 1))
+        df0s['stay'] = df0s.new_state.apply(lambda x: '10' + x[2:])
+        
+        # Subtract an out from hypotheticals if actual out occurred
+        for ix in df0s[~df0s.BAT_PLAY_TX.isna()].index:
+            num_outs = str(int(df0s.at[ix, 'out'][4]) - 1)
+            df0s.at[ix, 'stay'] = df0s.at[ix, 'stay'][:4] + num_outs
+            df0s.at[ix, 'out'] = df0s.at[ix, 'out'][:4] + num_outs
+            
+        # Change four outs to three outs
+        df0s['stay'] = np.where(df0s.stay.str[-1].astype(int) > 3, 
+                                df0s.stay.str[:-1] + '3', df0s.stay)
+        df0s['out'] = np.where(df0s.out.str[-1].astype(int) > 3, 
+                                df0s.out.str[:-1] + '3', df0s.out)
+        
+        # Reset index and get the original run values
+        df0s = df0s.reset_index(drop=True)         
+        orig_val = run.loc[df0s.state,].reset_index().loc[:, 'RUNS_ROI']
+        
+        # Calculate the value generated by each hypothetical state
+        df0s_stay = run.loc[df0s.stay,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df0s.runs_scored
+        df0s_out = run.loc[df0s.out,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df0s.runs_scored
+                    
+        # Calculate the expected run values given frequency
+        df0s_exp_runs = freq[j]['0s_stay'] * df0s_stay + \
+        freq[j]['0s_out'] * df0s_out
+        
+        # Calculate the UBR by the difference in runs expectation
+        ubr += (df0s.runs_value - df0s_exp_runs).sum()
     
-    # Subtract an out from hypotheticals if actual out occurred
-    for ix in df1s[df1s.EVENT_OUTS_CT > 0].index:
-        num_outs = str(int(df1s.at[ix, 'out'][4]) - 1)
-        df1s.at[ix, 'adv'] = df1s.at[ix, 'adv'][:4] + num_outs
-        df1s.at[ix, 'stay'] = df1s.at[ix, 'stay'][:4] + num_outs
-        df1s.at[ix, 'out'] = df1s.at[ix, 'out'][:4] + num_outs
+        # Batter hits double
+        df0d = p[(p.EVENT_CD == e['Double']) & (p.RUN1_DEST_ID != 2) & 
+                       (p.RUN2_DEST_ID != 2) & (p.RESP_BAT_ID == pid)]
+        
+        df0d['out'] = df0d.new_state.apply(lambda x: '000 ' + str(int(x[4])+1))
+        df0d['stay'] = df0d.new_state.apply(lambda x: '010 ' + x[4])
+        
+        # Subtract an out from hypotheticals if actual out occurred
+        for ix in df0d[~df0d.BAT_PLAY_TX.isna()].index:
+            num_outs = str(int(df0d.at[ix, 'out'][4]) - 1)
+            df0d.at[ix, 'stay'] = df0d.at[ix, 'stay'][:4] + num_outs
+            df0d.at[ix, 'out'] = df0d.at[ix, 'out'][:4] + num_outs
+            
+        # Change four outs to three outs
+        df0d['stay'] = np.where(df0d.stay.str[-1].astype(int) > 3, 
+                                df0d.stay.str[:-1] + '3', df0d.stay)
+        df0d['out'] = np.where(df0d.out.str[-1].astype(int) > 3, 
+                                df0d.out.str[:-1] + '3', df0d.out)
+        
+        # Reset index and get the original run values
+        df0d = df0d.reset_index(drop=True)         
+        orig_val = run.loc[df0d.state,].reset_index().loc[:, 'RUNS_ROI']
+        
+        # Calculate the value generated by each hypothetical state
+        df0d_stay = run.loc[df0d.stay,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df0d.runs_scored
+        df0d_out = run.loc[df0d.out,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df0d.runs_scored
+                    
+        # Calculate the expected run values given frequency
+        df0d_exp_runs = freq[j]['0d_stay'] * df0d_stay + \
+        freq[j]['0d_out'] * df0d_out
+        
+        # Calculate the UBR by the difference in runs expectation
+        ubr += (df0d.runs_value - df0d_exp_runs).sum()
+        
+        # Type 3 UBR
+        
+        # Tagging from second base
+        df2f = p[(p.BASE2_RUN_ID == pid) & (p.BASE3_RUN_ID.isna()) & 
+                   (p.BATTEDBALL_CD == 'F')]
+        
+        # Calculate the advance, stay, out states unless inning ends
+        # Add out if actual state was not out
+        df2f['adv'] = df2f.new_state.apply(lambda x: x[:2] + '1' + x[3:])
+        df2f['stay'] = df2f.new_state.apply(lambda x: x[:1] + '10' + x[3:])
+        df2f['out'] = df2f.new_state.apply(lambda x: x[:2] + '0 ' + 
+                        str(int(x[4]) + 1))
+        
+        # Subtract an out from hypotheticals if actual out occurred
+        for ix in df2f[df2f.EVENT_OUTS_CT > 1].index:
+            num_outs = str(int(df2f.at[ix, 'out'][4]) - 1)
+            df2f.at[ix, 'adv'] = df2f.at[ix, 'adv'][:4] + num_outs
+            df2f.at[ix, 'stay'] = df2f.at[ix, 'stay'][:4] + num_outs
+            df2f.at[ix, 'out'] = df2f.at[ix, 'out'][:4] + num_outs
+        print('---------------------------------')
+        print(df2f.out)
+        # Change four outs to three outs
+        df2f['adv'] = np.where(df2f.adv.str[-1].astype(int) > 3, 
+                        df2f.adv.str[:-1] + '3', df2f.adv)
+        df2f['stay'] = np.where(df2f.stay.str[-1].astype(int) > 3, 
+                                df2f.stay.str[:-1] + '3', df2f.stay)
+        df2f['out'] = np.where(df2f.out.str[-1].astype(int) > 3, 
+                                df2f.out.str[:-1] + '3', df2f.out)
+        
+        # Reset index and get the original run values
+        df2f = df2f.reset_index(drop=True)         
+        orig_val = run.loc[df2f.state,].reset_index().loc[:, 'RUNS_ROI']
+        
+        # Calculate the value generated by each hypothetical state
+        df2f_adv = run.loc[df2f.adv,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df2f.runs_scored
+        df2f_stay = run.loc[df2f.stay,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df2f.runs_scored
+        print(df2f.out)
+        df2f_out = run.loc[df2f.out,].reset_index().loc[:, 'RUNS_ROI'] - \
+                    orig_val + df2f.runs_scored
+                    
+        # Calculate the expected run values given frequency
+        df2f_exp_runs = freq[j]['2f_advance'] * df2f_adv + \
+                        freq[j]['2f_stay'] * df2f_stay + \
+                        freq[j]['2f_out'] * df2f_out
+        
+        # Calculate the UBR by the difference in runs expectation
+        ubr += (df2f.runs_value - df2f_exp_runs).sum()
     
-    # Reset index and get the original run values
-    df1s = df1s.reset_index(drop=True)         
-    orig_val = run.loc[df1s.state,].reset_index().loc[:, 'RUNS_ROI']
-    
-    # Calculate the value generated by each hypothetical state
-    df1s_adv = run.loc[df1s.adv,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df1s.runs_scored
-    df1s_stay = run.loc[df1s.stay,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df1s.runs_scored
-    df1s_out = run.loc[df1s.out,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df1s.runs_scored
-                
-    # Calculate the expected run values given frequency
-    df1s_exp_runs = freq['1s_advance'] * df1s_adv + \
-                    freq['1s_stay'] * df1s_stay + freq['1s_out'] * df1s_out
-    
-    # Calculate the UBR by the difference in runs expectation
-    ubr = (df1s.runs_value - df1s_exp_runs).sum()
-    
-    # Runner on first double not blocked
-    df1d = pbp[(pbp.BASE1_RUN_ID == pid) & (pbp.EVENT_CD == e['Double'])]
-    
-    # Calculate the advance, stay, out states unless inning ends
-    df1d['adv'] = df1d.new_state.apply(lambda x: '010' + x[3:])
-    df1d['stay'] = df1d.new_state.apply(lambda x: '011' + x[3:])
-    df1d['out'] = df1d.new_state.apply(lambda x: '010 ' + str(int(x[4]) + 1))
-    
-    # Subtract an out from hypotheticals if actual out occurred
-    for ix in df1d[df1d.EVENT_OUTS_CT > 0].index:
-        num_outs = str(int(df1d.at[ix, 'out'][4]) - 1)
-        df1d.at[ix, 'adv'] = df1d.at[ix, 'adv'][:4] + num_outs
-        df1d.at[ix, 'stay'] = df1d.at[ix, 'stay'][:4] + num_outs
-        df1d.at[ix, 'out'] = df1d.at[ix, 'out'][:4] + num_outs
-    
-    # Reset index and get the original run values
-    df1d = df1d.reset_index(drop=True)         
-    orig_val = run.loc[df1d.state,].reset_index().loc[:, 'RUNS_ROI']
-    
-    # Calculate the value generated by each hypothetical state
-    df1d_adv = run.loc[df1d.adv,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df1d.runs_scored
-    df1d_stay = run.loc[df1d.stay,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df1d.runs_scored
-    df1d_out = run.loc[df1d.out,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df1d.runs_scored
-                
-    # Calculate the expected run values given frequency
-    df1d_exp_runs = freq['1d_advance'] * df1d_adv + \
-                    freq['1d_stay'] * df1d_stay + freq['1d_out'] * df1d_out
-    
-    # Calculate the UBR by the difference in runs expectation
-    ubr += (df1d.runs_value - df1d_exp_runs).sum()
-    
-    # Runner on second single
-    df2s = pbp[(pbp.BASE2_RUN_ID == pid) & (pbp.EVENT_CD == e['Single'])]
-    
-     # Calculate the advance, stay, out states unless inning ends
-    df2s['adv'] = df2s.new_state.apply(lambda x: x[:2] + '0' + x[3:])
-    df2s['stay'] = df2s.new_state.apply(lambda x: x[:2] + '1' + x[3:])
-    df2s['out'] = df2s.new_state.apply(lambda x: x[:2] + '0 ' + \
-                    str(int(x[4]) + 1))
-    
-    # Subtract an out from hypotheticals if actual out occurred
-    for ix in df2s[df2s.EVENT_OUTS_CT > 0].index:
-        num_outs = str(int(df2s.at[ix, 'out'][4]) - 1)
-        df2s.at[ix, 'adv'] = df2s.at[ix, 'adv'][:4] + num_outs
-        df2s.at[ix, 'stay'] = df2s.at[ix, 'stay'][:4] + num_outs
-        df2s.at[ix, 'out'] = df2s.at[ix, 'out'][:4] + num_outs
-    
-    # Reset index and get the original run values
-    df2s = df2s.reset_index(drop=True)         
-    orig_val = run.loc[df2s.state,].reset_index().loc[:, 'RUNS_ROI']
-    
-    # Calculate the value generated by each hypothetical state
-    df2s_adv = run.loc[df2s.adv,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df2s.runs_scored
-    df2s_stay = run.loc[df2s.stay,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df2s.runs_scored
-    df2s_out = run.loc[df2s.out,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df2s.runs_scored
-                
-    # Calculate the expected run values given frequency
-    df2s_exp_runs = freq['2s_advance'] * df2s_adv + \
-                    freq['2s_stay'] * df2s_stay + freq['2s_out'] * df2s_out
-    
-    # Calculate the UBR by the difference in runs expectation
-    ubr += (df2s.runs_value - df2s_exp_runs).sum()
-    
-    # Type 2 UBR
-
-    # Batter hits single
-    df0s = pbp[(pbp.EVENT_CD == e['Single']) & (pbp.RUN1_DEST_ID != 2) & \
-               (pbp.RESP_BAT_ID == pid)]
-
-    df0s['out'] = df0s.new_state.apply(lambda x: '00' + x[2:4] + \
-                    str(int(x[4]) + 1))
-    df0s['stay'] = df0s.new_state.apply(lambda x: '10' + x[2:])
-    
-    # Subtract an out from hypotheticals if actual out occurred
-    for ix in df0s[~df0s.BAT_PLAY_TX.isna()].index:
-        num_outs = str(int(df0s.at[ix, 'out'][4]) - 1)
-        df0s.at[ix, 'stay'] = df0s.at[ix, 'stay'][:4] + num_outs
-        df0s.at[ix, 'out'] = df0s.at[ix, 'out'][:4] + num_outs
-    
-    # Reset index and get the original run values
-    df0s = df0s.reset_index(drop=True)         
-    orig_val = run.loc[df0s.state,].reset_index().loc[:, 'RUNS_ROI']
-    
-    # Calculate the value generated by each hypothetical state
-    df0s_stay = run.loc[df0s.stay,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df0s.runs_scored
-    df0s_out = run.loc[df0s.out,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df0s.runs_scored
-                
-    # Calculate the expected run values given frequency
-    df0s_exp_runs = freq['0s_stay'] * df0s_stay + freq['0s_out'] * df0s_out
-    
-    # Calculate the UBR by the difference in runs expectation
-    ubr += (df0s.runs_value - df0s_exp_runs).sum()
-
-    # Batter hits double
-    df0d = pbp[(pbp.EVENT_CD == e['Double']) & (pbp.RUN1_DEST_ID != 2) & \
-                   (pbp.RUN2_DEST_ID != 2) & (pbp.RESP_BAT_ID == pid)]
-    
-    df0d['out'] = df0d.new_state.apply(lambda x: '000 ' + str(int(x[4]) + 1))
-    df0d['stay'] = df0d.new_state.apply(lambda x: '010 ' + x[4])
-    
-    # Subtract an out from hypotheticals if actual out occurred
-    for ix in df0d[~df0d.BAT_PLAY_TX.isna()].index:
-        num_outs = str(int(df0d.at[ix, 'out'][4]) - 1)
-        df0d.at[ix, 'stay'] = df0d.at[ix, 'stay'][:4] + num_outs
-        df0d.at[ix, 'out'] = df0d.at[ix, 'out'][:4] + num_outs
-    
-    # Reset index and get the original run values
-    df0d = df0d.reset_index(drop=True)         
-    orig_val = run.loc[df0d.state,].reset_index().loc[:, 'RUNS_ROI']
-    
-    # Calculate the value generated by each hypothetical state
-    df0d_stay = run.loc[df0d.stay,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df0d.runs_scored
-    df0d_out = run.loc[df0d.out,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df0d.runs_scored
-                
-    # Calculate the expected run values given frequency
-    df0d_exp_runs = freq['0d_stay'] * df0d_stay + freq['0d_out'] * df0d_out
-    
-    # Calculate the UBR by the difference in runs expectation
-    ubr += (df0d.runs_value - df0d_exp_runs).sum()
-    
-    # Type 3 UBR
-    
-    # Tagging from second base
-    df2f = pbp[(pbp.BASE2_RUN_ID == pid) & (pbp.BASE3_RUN_ID.isna()) & 
-               (pbp.BATTEDBALL_CD == 'F')]
-    
-    # Calculate the advance, stay, out states unless inning ends
-    # Add out if actual state was not out
-    df2f['adv'] = df2f.new_state.apply(lambda x: x[:2] + '1' + x[3:])
-    df2f['stay'] = df2f.new_state.apply(lambda x: x[:1] + '10' + x[3:])
-    df2f['out'] = df2f.new_state.apply(lambda x: x[:2] + '0 ' + \
-                    str(int(x[4]) + 1))
-    
-    # Subtract an out from hypotheticals if actual out occurred
-    for ix in df2f[df2f.EVENT_OUTS_CT > 1].index:
-        num_outs = str(int(df2f.at[ix, 'out'][4]) - 1)
-        df2f.at[ix, 'adv'] = df2f.at[ix, 'adv'][:4] + num_outs
-        df2f.at[ix, 'stay'] = df2f.at[ix, 'stay'][:4] + num_outs
-        df2f.at[ix, 'out'] = df2f.at[ix, 'out'][:4] + num_outs
-    
-    # Reset index and get the original run values
-    df2f = df2f.reset_index(drop=True)         
-    orig_val = run.loc[df2f.state,].reset_index().loc[:, 'RUNS_ROI']
-    
-    # Calculate the value generated by each hypothetical state
-    df2f_adv = run.loc[df2f.adv,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df2f.runs_scored
-    df2f_stay = run.loc[df2f.stay,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df2f.runs_scored
-    df2f_out = run.loc[df2f.out,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df2f.runs_scored
-                
-    # Calculate the expected run values given frequency
-    df2f_exp_runs = freq['2f_advance'] * df2f_adv + \
-                    freq['2f_stay'] * df2f_stay + freq['2f_out'] * df2f_out
-    
-    # Calculate the UBR by the difference in runs expectation
-    ubr += (df2f.runs_value - df2f_exp_runs).sum()
-
-    # Tagging from third base
-    df3f = pbp[(pbp.BASE3_RUN_ID == pid) & (pbp.BATTEDBALL_CD =='F')]
-    
-    # Calculate the advance, stay, out states unless inning ends
-    df3f['adv'] = df3f.new_state.apply(lambda x: x[:2] + '0' + x[3:])
-    df3f['stay'] = df3f.new_state.apply(lambda x: x[:2] + '1' + x[3:])
-    df3f['out'] = df3f.new_state.apply(lambda x: x[:2] + '0 ' + \
-                    str(int(x[4]) + 1))
-    
-    # Subtract an out from hypotheticals if actual out occurred
-    for ix in df3f[df3f.EVENT_OUTS_CT > 1].index:
-        num_outs = str(int(df3f.at[ix, 'out'][4]) - 1)
-        df3f.at[ix, 'adv'] = df3f.at[ix, 'adv'][:4] + num_outs
-        df3f.at[ix, 'stay'] = df3f.at[ix, 'stay'][:4] + num_outs
-        df3f.at[ix, 'out'] = df3f.at[ix, 'out'][:4] + num_outs
-    
-    # Reset index and get the original run values
-    df3f = df3f.reset_index(drop=True)         
-    orig_val = run.loc[df3f.state,].reset_index().loc[:, 'RUNS_ROI']
-    
-    # Calculate the value generated by each hypothetical state
-    df3f_adv = run.loc[df3f.adv,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df3f.runs_scored
-    df3f_stay = run.loc[df3f.stay,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df3f.runs_scored
-    df3f_out = run.loc[df3f.out,].reset_index().loc[:, 'RUNS_ROI'] \
-                - orig_val + df3f.runs_scored
-                
-    # Calculate the expected run values given frequency
-    df3f_exp_runs = freq['3f_advance'] * df3f_adv + \
-                    freq['3f_stay'] * df3f_stay + freq['3f_out'] * df3f_out
-    
-    # Calculate the UBR by the difference in runs expectation
-    ubr += (df3f.runs_value - df3f_exp_runs).sum()
+        # Tagging from third base
+        df3f = p[(p.BASE3_RUN_ID == pid) & (p.BATTEDBALL_CD =='F')]
+        
+        # Calculate the advance, stay, out states unless inning ends
+        df3f['adv'] = df3f.new_state.apply(lambda x: x[:2] + '0' + x[3:])
+        df3f['stay'] = df3f.new_state.apply(lambda x: x[:2] + '1' + x[3:])
+        df3f['out'] = df3f.new_state.apply(lambda x: x[:2] + '0 ' + 
+                        str(int(x[4]) + 1))
+        
+        # Subtract an out from hypotheticals if actual out occurred
+        for ix in df3f[df3f.EVENT_OUTS_CT > 1].index:
+            num_outs = str(int(df3f.at[ix, 'out'][4]) - 1)
+            df3f.at[ix, 'adv'] = df3f.at[ix, 'adv'][:4] + num_outs
+            df3f.at[ix, 'stay'] = df3f.at[ix, 'stay'][:4] + num_outs
+            df3f.at[ix, 'out'] = df3f.at[ix, 'out'][:4] + num_outs
+            
+        # Change four outs to three outs
+        df3f['adv'] = np.where(df3f.adv.str[-1].astype(int) > 3, 
+                        df3f.adv.str[:-1] + '3', df3f.adv)
+        df3f['stay'] = np.where(df3f.stay.str[-1].astype(int) > 3, 
+                                df3f.stay.str[:-1] + '3', df3f.stay)
+        df3f['out'] = np.where(df3f.out.str[-1].astype(int) > 3, 
+                                df3f.out.str[:-1] + '3', df3f.out)
+        
+        # Reset index and get the original run values
+        df3f = df3f.reset_index(drop=True)         
+        orig_val = run.loc[df3f.state,].reset_index().loc[:, 'RUNS_ROI']
+        
+        # Calculate the value generated by each hypothetical state
+        df3f_adv = run.loc[df3f.adv,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df3f.runs_scored
+        df3f_stay = run.loc[df3f.stay,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df3f.runs_scored
+        df3f_out = run.loc[df3f.out,].reset_index().loc[:, 'RUNS_ROI'] \
+                    - orig_val + df3f.runs_scored
+                    
+        # Calculate the expected run values given frequency
+        df3f_exp_runs = freq[j]['3f_advance'] * df3f_adv + \
+                        freq[j]['3f_stay'] * df3f_stay + \
+                        freq[j]['3f_out'] * df3f_out
+        
+        # Calculate the UBR by the difference in runs expectation
+        ubr += (df3f.runs_value - df3f_exp_runs).sum()
     
     return ubr
+
 
 def wSB_constants(pbp):
     ''' Calculate constants lgwSB, runSB, runCS for a set of play by play data
@@ -740,7 +798,7 @@ def wSB_score(pbp, pid, wSB_const):
     runCS = wSB_const['runCS']
     lgwSB = wSB_const['lgwSB']
     return (SB * runSB + CS * runCS) - lgwSB * (Single + BB + HBP - IBB)
-#%%
+
 def wOBA_constants(pbp):
     ''' Calculate constants for wOBA which is the average runs value for 
     unintentional walks, hit by pitches, first base, second base, third base,
@@ -815,8 +873,6 @@ def wOBA_constants(pbp):
     d['league_wOBA'] = wOBA_top / wOBA_bot
 
     return d
-
-#%%
 
 def wOBA_score(pbp, pid, wOBA_const):
     ''' Calculate a player's wOBA
@@ -1123,8 +1179,6 @@ def batted_ball(pbp, df, runs_pbp):
         
     return df
 
-#%%
-
 def runs_per_win(pbp):
     ''' Get the runs per win for play by play data
     
@@ -1155,7 +1209,6 @@ def runs_per_win(pbp):
     # return Caola derived runs per win
     return 4 * runs_per_game / pythagorean_coefficient
 
-#%%
 def win_probability(pbp, df, runs_pbp, wp_pbp, run_type='differential',
                     wp_standings=None, pbp_standings=None):
     ''' Add win probability data to dataframe. There are different options
@@ -1224,55 +1277,3 @@ def win_probability(pbp, df, runs_pbp, wp_pbp, run_type='differential',
         df.at[ix, 'REW'] = df.at[ix, 'RE24'] / RPW
         
     return df
-#%%
-# =============================================================================
-# #%% testing
-# roster = pd.read_csv('roster2018.csv')
-# names = [['Albert', 'Pujols'], ['Mike', 'Trout'], ['David', 'Fletcher']]
-# #names = [['Mike', 'Trout']]
-# from initialize_players import initialize_list_to_df
-# df1 = initialize_list_to_df(roster, names)
-# pbp = pd.read_csv('all2018.csv', header=None)
-# fields = pd.read_csv('fields.csv')
-# pbp.columns = fields.loc[:, 'Header']
-# 
-# #%%
-# 
-# df = standard_batting(pbp, df1)
-# #df = advanced_batting(pbp, df, pbp)
-# df = batted_ball(pbp, df, pbp)
-# 
-# =============================================================================
-#%% WPA testing
-roster = pd.read_csv('roster2018.csv')
-#names = [['Albert', 'Pujols'], ['Mike', 'Trout'], ['David', 'Fletcher']]
-names = [['Mike', 'Trout']]
-from initialize_players import initialize_list_to_df
-df1 = initialize_list_to_df(roster, names)
-
-pbp = pd.read_csv('all2018.csv', header=None)
-pbp2017 = pd.read_csv('all2017.csv', header=None)
-pbp2016 = pd.read_csv('all2016.csv', header=None)
-pbp2015 = pd.read_csv('all2015.csv', header=None)
-pbp2014 = pd.read_csv('all2014.csv', header=None)
-
-wp_pbp = pbp.append(pbp2017)
-wp_pbp = wp_pbp.append(pbp2016)
-wp_pbp = wp_pbp.append(pbp2015)
-wp_pbp = wp_pbp.append(pbp2014)
-
-
-fields = pd.read_csv('fields.csv')
-pbp.columns = fields.loc[:, 'Header']
-wp_pbp.columns = fields.loc[:, 'Header']
-
-df = standard_batting(pbp, df1)
-
-stand_wp_pbp = create_standings(wp_pbp)
-stand_pbp = create_standings(pbp)
-
-#%%
-df2 = win_probability(pbp, df, pbp, wp_pbp, run_type='differential',
-                     wp_standings=stand_wp_pbp, pbp_standings=stand_pbp)
-
-
