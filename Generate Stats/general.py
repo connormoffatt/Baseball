@@ -1,5 +1,36 @@
 import pandas as pd
 import numpy as np
+import re
+
+def retrosheet_event_dict():
+    ''' create and return retrosheet event dictionary'''
+    d = {}
+    d['Unknown Event'] = 0
+    d['No event'] = 1
+    d['Generic out'] = 2
+    d['Strikeout'] = 3
+    d['Stolen base'] = 4
+    d['Defensive indifference'] = 5
+    d['Caught stealing'] = 6
+    d['Pickoff error'] = 7
+    d['Pickoff'] = 8
+    d['Wild pitch'] = 9
+    d['Passed ball'] = 10
+    d['Balk'] = 11
+    d['Other Advance'] = 12
+    d['Foul error'] = 13
+    d['Walk'] = 14
+    d['Intentional walk'] = 15
+    d['Hit by pitch'] = 16
+    d['Interference'] = 17
+    d['Error'] = 18
+    d['Fielder choice'] = 19
+    d['Single'] = 20
+    d['Double'] = 21
+    d['Triple'] = 22
+    d['Home run'] = 23
+    d['Missing play'] = 24
+    return d
 
 def create_runs_matrix(pbp):
     ''' Solve for runs matrix (df) for base-out states given a set of
@@ -358,7 +389,6 @@ def add_home_won(pbp):
     
     return pbp.merge(end)
 
-#%%
 def win_prob_matrix(pbp):
     ''' Create win probability matrix. There is the option to use run
     differential or actual score. There is also an optioon to account for 
@@ -386,8 +416,6 @@ def win_prob_matrix(pbp):
     
     return win_matrix
 
-#%%
-    
 def add_win_prob_value(pbp, win_matrix):
     ''' Determine impact on win probability for each play. pbp data needs to
     have the attribute 'home_win_prob' that gives the probability the home
@@ -424,4 +452,131 @@ def add_win_prob_value(pbp, win_matrix):
     pbp['win_value'] = pbp.new_home_win_prob - pbp.home_win_prob
     
     return pbp
+
+def retrosheet_add_location(pbp):
+    '''Extract the location of each batting play from the event text.
+    
+    Argument: retrosheet play by play data
+    '''
+    
+    e = retrosheet_event_dict()
+    ball_in_play = [e['Single'], e['Double'], e['Triple'], e['Generic out'],
+                    e['Error'], e['Fielder choice']]
+    
+    # location will be a string ff
+    # Get event text for all balls in play
+    pbp['location'] = np.where(pbp.EVENT_CD.isin(ball_in_play), pbp.EVENT_TX, None)
+    
+    # Single, Triple, and Error
+    pbp['location'] = np.where((pbp.EVENT_CD == e['Single']) | \
+            (pbp.EVENT_CD == e['Triple']) | (pbp.EVENT_CD == e['Error']),
+            pbp.EVENT_TX.apply(lambda x: re.split('/|\(|!|E|\.|-|\?|\+', 
+                                                       x)[0]).str[1:],
+            pbp.location)
+    
+    # Double. Don't count ground rule doublese because they are uncatchable and
+    # runners advancement is predetermined
+    pbp['location'] = np.where(pbp.EVENT_CD == e['Double'],
+            pbp.EVENT_TX.apply(lambda x: re.split('/|\(|!|E|\.|-|\?|\+', 
+                                        x)[0]).str[1:], pbp.location)
+    pbp['location'] = np.where(pbp.location.str[0:2] == 'GR', None,
+                       pbp.location)
+    
+    # Outs in play
+    pbp['location'] = np.where(pbp.EVENT_CD == e['Generic out'], 
+       pbp.EVENT_TX.apply(lambda x: re.split('/|\(|!|E|\.|-|\?|\+', x)[0]),
+       pbp.location)
+       
+    # Error
+    pbp['location'] = np.where(pbp.EVENT_CD == e['Error'], pbp.EVENT_TX.apply(
+            lambda x: re.split('/|\(|!|\.|-|\?|\+', x)[0]).str[1:], 
+            pbp.location)
+       
+    # Fielder's Choice
+    pbp['location'] = np.where(pbp.EVENT_CD == e['Fielder choice'],
+            pbp.EVENT_TX.apply(lambda x: re.split('/|\(|!|E|\.|-|\?|\+', 
+                                                x)[0]).str[2:], pbp.location)
+       
+    # Set empty strings to none
+    pbp['location'] = np.where(pbp.location == '', None, pbp.location)
+    
+    # Get rid of locations that are not in the following list
+    pot_loc = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '46', '64', '56', 
+               '65', '34', '43', '78', '87', '89', '98']
+    pbp['location'] = np.where(pbp.location.isin(pot_loc), pbp.location, None)
+    
+    # Clean symmetric locations
+    pbp['location'] = np.where(pbp.location == '43', '34', pbp.location)
+    pbp['location'] = np.where(pbp.location == '64', '46', pbp.location)
+    pbp['location'] = np.where(pbp.location == '65', '56', pbp.location)
+    pbp['location'] = np.where(pbp.location == '87', '78', pbp.location)
+    pbp['location'] = np.where(pbp.location == '98', '89', pbp.location)
+    return pbp
+    
+def retrosheet_add_zone(pbp):
+    '''Determine which fielder's location every batted ball is hit into. Zone 
+    is simply assigned a number according to the fielder number. Zone is 
+    entered probabilistically if between two locations
+    
+    Argument: retrosheet play by play data
+    '''
+    # Set zone as location
+    pbp['zone'] = pbp.location
+    
+    # Get count of each zone. Simplify symmetric locations
+    location = pbp.loc[:, ['GAME_ID', 'location']]
+    location = location.groupby(['location']).count()
+    
+    # Get frequency of locations with more than one character
+    # Example: freq_loc['34'] gives freq of 3 / (freq of 3 + freq of 4)
+    freq_loc = {}
+    for ix in location[location.index.str.len() == 2].index:
+        freq_loc[ix] = int(location.loc[ix[0]]) / (int(location.loc[ix[0]]) + \
+                            int(location.loc[ix[1]]))
+    
+    # Get zones. For locations with two positions, probabilistically determine zone
+    p = pbp[~pbp.location.isna()]
+    p['random'] = np.random.uniform(size=len(p))
+    for ix, row in p[p.location.str.len() == 2].iterrows():
+        if freq_loc[row['location']] >= p.at[ix, 'random']:
+            pbp.at[ix, 'zone'] = row['location'][0]
+        else:
+            pbp.at[ix, 'zone'] = row['location'][1]
+            
+    return pbp
+
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     
